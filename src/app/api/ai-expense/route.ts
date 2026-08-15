@@ -3,45 +3,72 @@ import { NextResponse } from 'next/server';
 export async function POST(request: Request) {
   try {
     const { text } = await request.json();
-    
-    // دعم قراءة المفتاح بأي اسم (سواء الجديد أو القديم)
-    const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return NextResponse.json({ expenses: [], error: 'النص فارغ.' }, { status: 200 });
+    }
+
+    const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
-      return NextResponse.json({ error: "مفتاح الـ API غير موجود على السيرفر" }, { status: 400 });
+      return NextResponse.json({ expenses: [], error: 'GROQ_API_KEY غير مضبوط على السيرفر.' }, { status: 200 });
     }
 
-    if (!text || !text.trim()) {
-      return NextResponse.json({ expenses: [] });
-    }
+    const prompt = `أنت محاسب ذكي تفهم اللهجة المصرية العامية والعربية الفصحى بشكل ممتاز.
+النص التالي يحتوي على مصروفات سجلها المستخدم بصوته: "${text}".
 
-    const prompt = `Extract expenses from this text: "${text}". 
-Return ONLY a valid JSON array of objects. Format: [{"amount": number, "merchant": "string"}]. 
-If no expense found, return []. No markdown, no extra text.`;
+المطلوب:
+1. استخراج كل مصروف مذكور.
+2. تجاهل الكلمات الزائدة (مثل: دفعت، اشتريت، جبت، صرفت، بـ، جنيه، ريال).
+3. استخراج المبلغ (amount) كرقم، واسم المصروف (merchant) كنص واضح.
+4. قم بإرجاع كائن JSON فقط (ONLY JSON) يحتوي على مصفوفة باسم "expenses".
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+مثال للرد المطلوب لو النص كان "جبت فطار بعشرين ومواصلات بـ 15 و 300 كهربا":
+{
+  "expenses": [
+    { "amount": 20, "merchant": "فطار" },
+    { "amount": 15, "merchant": "مواصلات" },
+    { "amount": 300, "merchant": "كهرباء" }
+  ]
+}`;
+
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+        response_format: { type: 'json_object' },
+      }),
     });
 
     if (!response.ok) {
-      const errData = await response.json();
-      throw new Error(errData.error?.message || "خطأ من سيرفر جوجل للذكاء الاصطناعي");
+      const errBody = await response.json().catch(() => ({}));
+      console.error('Groq chat error:', response.status, errBody);
+      return NextResponse.json(
+        { expenses: [], error: errBody?.error?.message || `فشل الاتصال بسيرفر التحليل (${response.status}).` },
+        { status: 200 }
+      );
     }
 
     const data = await response.json();
-    const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
-    
-    // استخراج الـ JSON بدقة مهما كان الرد
-    const match = aiText.match(/\[[\s\S]*\]/);
-    if (!match) {
-      return NextResponse.json({ expenses: [] });
+    const aiText = data.choices?.[0]?.message?.content || '{"expenses": []}';
+
+    let parsed: any = { expenses: [] };
+    try {
+      parsed = JSON.parse(aiText);
+    } catch {
+      const match = aiText.match(/\[[\s\S]*\]/);
+      parsed = { expenses: match ? JSON.parse(match[0]) : [] };
     }
 
-    const expenses = JSON.parse(match[0]);
-    return NextResponse.json({ expenses: Array.isArray(expenses) ? expenses : [] });
+    const expenses = Array.isArray(parsed.expenses) ? parsed.expenses : [];
+    return NextResponse.json({ expenses });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "خطأ داخلي في الخادم" }, { status: 500 });
+    console.error('ai-expense route error:', error);
+    return NextResponse.json({ expenses: [], error: error?.message || 'Unknown error' }, { status: 200 });
   }
 }
