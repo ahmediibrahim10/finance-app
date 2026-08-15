@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* باقي الكود الذي أضفناه سابقاً */
+@layer utilities {
+  .pb-safe {
+    padding-bottom: calc(env(safe-area-inset-bottom) + 1rem);
+  }
+  .pt-safe {
+    padding-top: calc(env(safe-area-inset-top) + 1rem);
+  }
+  .min-h-screen-safe {
+    min-height: 100vh; /* Fallback */
+    min-height: 100dvh; /* Dynamic Viewport for mobile browsers */
+  }
+}
+
+body {
+  background-color: #f3f4f6; /* لون خلفية هادئ ومريح للعين (iOS gray) */
+  -webkit-tap-highlight-color: transparent; /* إزالة مربع التحديد الأزرق عند الضغط على أزرار الآيفون */
+  user-select: none; /* منع تحديد النصوص عن طريق الخطأ */
+}

@@ -1,0 +1,17 @@
+{
+  "name": "Personal Finance",
+  "short_name": "Finance",
+  "description": "Safe-to-Spend Tracker",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f4f6",
+  "theme_color": "#f3f4f6",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
