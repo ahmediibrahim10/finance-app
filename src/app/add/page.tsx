@@ -33,9 +33,6 @@ function AddExpenseContent() {
   const [speechText, setSpeechText] = useState("");
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
 
-  // التسجيل المباشر وإرساله لـ Groq Whisper مع توجيه اللهجة
-  // الحل الجذري: التسجيل الديناميكي وإظهار الخطأ الحقيقي
-  // الحل الجذري النهائي لمشكلة صيغة الملف في الآيفون والأندرويد
   const toggleRecording = async () => {
     if (isListening && mediaRecorder) {
       mediaRecorder.stop();
@@ -48,7 +45,6 @@ function AddExpenseContent() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       
-      // 1. هنسيب المتصفح يختار أفضل صيغة مدعومة عنده بدون ما نجبره
       const recorder = new MediaRecorder(stream);
       audioChunksRef.current = [];
 
@@ -63,14 +59,11 @@ function AddExpenseContent() {
           streamRef.current.getTracks().forEach(track => track.stop());
         }
 
-        // 2. قراءة الصيغة اللي المتصفح سجل بيها فعلياً
         const actualMimeType = recorder.mimeType || 'audio/webm';
         const extension = actualMimeType.includes('mp4') ? 'mp4' : 'webm';
         
-        // 3. إنشاء Blob فقط (بدون استخدام كلاس File اللي بيعمل مشاكل على الآيفون)
         const audioBlob = new Blob(audioChunksRef.current, { type: actualMimeType });
 
-        // 4. التأكد إن المستخدم اتكلم والملف مش فاضي
         if (audioBlob.size < 1000) {
           setMessage("⚠️ التسجيل كان قصير جداً، حاول تتكلم بوضوح أكتر.");
           setIsProcessing(false);
@@ -82,7 +75,6 @@ function AddExpenseContent() {
           if (!apiKey) throw new Error("مفتاح API غير متوفر!");
 
           const formData = new FormData();
-          // إرسال الـ Blob مباشرة مع تحديد اسم وامتداد صحيح للسيرفر
           formData.append("file", audioBlob, `audio.${extension}`);
           formData.append("model", "whisper-large-v3");
           formData.append("language", "ar"); 
@@ -112,9 +104,10 @@ function AddExpenseContent() {
           setSpeechText(text);
           await processMultiExpenses(text);
 
-        } catch (error: any) {
+        } catch (error) {
           console.error("Audio Process Error:", error);
-          setMessage(`❌ المشكلة: ${error.message}`);
+          const errorMessage = error instanceof Error ? error.message : "خطأ غير معروف";
+          setMessage(`❌ المشكلة: ${errorMessage}`);
           setIsProcessing(false);
         }
       };
@@ -124,20 +117,10 @@ function AddExpenseContent() {
       setIsListening(true);
       setMessage("🎙️ أنا سامعك... اتكلم براحتك.");
 
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
-      setMessage(`❌ تعذر تشغيل المايك: ${err.message}`);
-    }
-  };
-
-      recorder.start();
-      setMediaRecorder(recorder);
-      setIsListening(true);
-      setMessage("🎙️ أنا سامعك... اتكلم براحتك.");
-
-    } catch (err: any) {
-      console.error(err);
-      setMessage(`❌ تعذر تشغيل المايك: ${err.message}`);
+      const errMessage = err instanceof Error ? err.message : "تعذر الوصول للمايك";
+      setMessage(`❌ تعذر تشغيل المايك: ${errMessage}`);
     }
   };
 
@@ -147,7 +130,6 @@ function AddExpenseContent() {
       const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
       if (!apiKey) throw new Error("مفتاح API غير موجود");
 
-      // توجيه صارم للموديل عشان يفهم العامية والمصري ويرجع JSON
       const prompt = `أنت محاسب ذكي تفهم اللهجة المصرية العامية والعربية الفصحى بشكل ممتاز.
 النص التالي يحتوي على مصروفات سجلها المستخدم بصوته: "${text}".
 
@@ -209,8 +191,7 @@ function AddExpenseContent() {
       setMessage(`✅ تم تسجيل ${expenses.length} معاملات بنجاح.`);
       setTimeout(() => router.push("/transactions"), 2000);
       
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } catch (error: any) {
+    } catch (error) {
       console.error("Parse Error:", error);
       setMessage("❌ خطأ في فهم البيانات، حاول بكلمات أبسط.");
       setIsProcessing(false);
