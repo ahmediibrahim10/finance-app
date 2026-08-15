@@ -35,6 +35,7 @@ function AddExpenseContent() {
 
   // التسجيل المباشر وإرساله لـ Groq Whisper مع توجيه اللهجة
   // الحل الجذري: التسجيل الديناميكي وإظهار الخطأ الحقيقي
+  // الحل الجذري النهائي لمشكلة صيغة الملف في الآيفون والأندرويد
   const toggleRecording = async () => {
     if (isListening && mediaRecorder) {
       mediaRecorder.stop();
@@ -47,15 +48,8 @@ function AddExpenseContent() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       
-      // 1. اكتشاف صيغة التسجيل المدعومة في المتصفح تلقائياً (عشان سفاري غير أندرويد)
-      let mimeType = '';
-      if (MediaRecorder.isTypeSupported('audio/webm')) {
-        mimeType = 'audio/webm';
-      } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-        mimeType = 'audio/mp4';
-      }
-
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      // 1. هنسيب المتصفح يختار أفضل صيغة مدعومة عنده بدون ما نجبره
+      const recorder = new MediaRecorder(stream);
       audioChunksRef.current = [];
 
       recorder.ondataavailable = (e) => {
@@ -65,24 +59,31 @@ function AddExpenseContent() {
       recorder.onstop = async () => {
         setIsProcessing(true);
         
-        // 2. تسمية الملف بامتداد صحيح يطابق نوع التسجيل عشان Groq مايرفضوش
-        const finalMime = mimeType || 'audio/webm';
-        const extension = finalMime.includes('mp4') ? 'm4a' : 'webm'; // m4a هي الصيغة الصوتية لآبل
-        
-        const audioBlob = new Blob(audioChunksRef.current, { type: finalMime });
-        const file = new File([audioBlob], `audio.${extension}`, { type: finalMime });
-
         if (streamRef.current) {
           streamRef.current.getTracks().forEach(track => track.stop());
         }
 
+        // 2. قراءة الصيغة اللي المتصفح سجل بيها فعلياً
+        const actualMimeType = recorder.mimeType || 'audio/webm';
+        const extension = actualMimeType.includes('mp4') ? 'mp4' : 'webm';
+        
+        // 3. إنشاء Blob فقط (بدون استخدام كلاس File اللي بيعمل مشاكل على الآيفون)
+        const audioBlob = new Blob(audioChunksRef.current, { type: actualMimeType });
+
+        // 4. التأكد إن المستخدم اتكلم والملف مش فاضي
+        if (audioBlob.size < 1000) {
+          setMessage("⚠️ التسجيل كان قصير جداً، حاول تتكلم بوضوح أكتر.");
+          setIsProcessing(false);
+          return;
+        }
+
         try {
           const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-          // لو المفتاح مش موجود، هنقولك فوراً
-          if (!apiKey) throw new Error("مفتاح API غير متوفر! تأكد من إعدادات Netlify واعمل Deploy جديد.");
+          if (!apiKey) throw new Error("مفتاح API غير متوفر!");
 
           const formData = new FormData();
-          formData.append("file", file);
+          // إرسال الـ Blob مباشرة مع تحديد اسم وامتداد صحيح للسيرفر
+          formData.append("file", audioBlob, `audio.${extension}`);
           formData.append("model", "whisper-large-v3");
           formData.append("language", "ar"); 
           formData.append("prompt", "تسجيل صوتي لمصروفات يومية باللهجة المصرية والعربية العامية. كلمات مثل: دفعت، اشتريت، جبت، بـ، جنيه، ريال، مواصلات، كهرباء، فطار، غدا، عشا، فاتورة.");
@@ -93,7 +94,6 @@ function AddExpenseContent() {
             body: formData
           });
 
-          // 3. لو السيرفر رفض، هنقرأ رسالة الخطأ الحقيقية منه ونعرضها لك!
           if (!audioRes.ok) {
             const errorData = await audioRes.json().catch(() => ({}));
             console.error("Groq Server Error:", errorData);
@@ -114,11 +114,21 @@ function AddExpenseContent() {
 
         } catch (error: any) {
           console.error("Audio Process Error:", error);
-          // هنا هيظهرلك سبب المشكلة الحقيقي 100% على الشاشة
           setMessage(`❌ المشكلة: ${error.message}`);
           setIsProcessing(false);
         }
       };
+
+      recorder.start();
+      setMediaRecorder(recorder);
+      setIsListening(true);
+      setMessage("🎙️ أنا سامعك... اتكلم براحتك.");
+
+    } catch (err: any) {
+      console.error(err);
+      setMessage(`❌ تعذر تشغيل المايك: ${err.message}`);
+    }
+  };
 
       recorder.start();
       setMediaRecorder(recorder);
