@@ -34,6 +34,7 @@ function AddExpenseContent() {
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
 
   // التسجيل المباشر وإرساله لـ Groq Whisper مع توجيه اللهجة
+  // الحل الجذري: التسجيل الديناميكي وإظهار الخطأ الحقيقي
   const toggleRecording = async () => {
     if (isListening && mediaRecorder) {
       mediaRecorder.stop();
@@ -46,17 +47,30 @@ function AddExpenseContent() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       
-      const recorder = new MediaRecorder(stream);
+      // 1. اكتشاف صيغة التسجيل المدعومة في المتصفح تلقائياً (عشان سفاري غير أندرويد)
+      let mimeType = '';
+      if (MediaRecorder.isTypeSupported('audio/webm')) {
+        mimeType = 'audio/webm';
+      } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+        mimeType = 'audio/mp4';
+      }
+
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       audioChunksRef.current = [];
 
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
       };
 
       recorder.onstop = async () => {
         setIsProcessing(true);
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/mp4' });
-        const file = new File([audioBlob], "audio.mp4", { type: "audio/mp4" });
+        
+        // 2. تسمية الملف بامتداد صحيح يطابق نوع التسجيل عشان Groq مايرفضوش
+        const finalMime = mimeType || 'audio/webm';
+        const extension = finalMime.includes('mp4') ? 'm4a' : 'webm'; // m4a هي الصيغة الصوتية لآبل
+        
+        const audioBlob = new Blob(audioChunksRef.current, { type: finalMime });
+        const file = new File([audioBlob], `audio.${extension}`, { type: finalMime });
 
         if (streamRef.current) {
           streamRef.current.getTracks().forEach(track => track.stop());
@@ -64,13 +78,13 @@ function AddExpenseContent() {
 
         try {
           const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-          if (!apiKey) throw new Error("مفتاح API غير موجود");
+          // لو المفتاح مش موجود، هنقولك فوراً
+          if (!apiKey) throw new Error("مفتاح API غير متوفر! تأكد من إعدادات Netlify واعمل Deploy جديد.");
 
           const formData = new FormData();
           formData.append("file", file);
           formData.append("model", "whisper-large-v3");
           formData.append("language", "ar"); 
-          // التلميح لضبط استماع اللهجة المصرية والعامية
           formData.append("prompt", "تسجيل صوتي لمصروفات يومية باللهجة المصرية والعربية العامية. كلمات مثل: دفعت، اشتريت، جبت، بـ، جنيه، ريال، مواصلات، كهرباء، فطار، غدا، عشا، فاتورة.");
 
           const audioRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
@@ -79,13 +93,18 @@ function AddExpenseContent() {
             body: formData
           });
 
-          if (!audioRes.ok) throw new Error("فشل تحويل الصوت");
+          // 3. لو السيرفر رفض، هنقرأ رسالة الخطأ الحقيقية منه ونعرضها لك!
+          if (!audioRes.ok) {
+            const errorData = await audioRes.json().catch(() => ({}));
+            console.error("Groq Server Error:", errorData);
+            throw new Error(errorData.error?.message || `رفض من السيرفر برمز: ${audioRes.status}`);
+          }
           
           const audioData = await audioRes.json();
           const text = audioData.text;
           
           if (!text || text.trim() === "") {
-            setMessage("⚠️ لم يتم التقاط صوت واضح.");
+            setMessage("⚠️ لم يتم التقاط صوت واضح، جرب تعلي صوتك.");
             setIsProcessing(false);
             return;
           }
@@ -94,7 +113,9 @@ function AddExpenseContent() {
           await processMultiExpenses(text);
 
         } catch (error: any) {
-          setMessage("❌ حدث خطأ في معالجة الصوت.");
+          console.error("Audio Process Error:", error);
+          // هنا هيظهرلك سبب المشكلة الحقيقي 100% على الشاشة
+          setMessage(`❌ المشكلة: ${error.message}`);
           setIsProcessing(false);
         }
       };
@@ -102,11 +123,11 @@ function AddExpenseContent() {
       recorder.start();
       setMediaRecorder(recorder);
       setIsListening(true);
-      setMessage("🎙️ أنا سامعك... اتكلم براحتك مصري أو عامية.");
+      setMessage("🎙️ أنا سامعك... اتكلم براحتك.");
 
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setMessage("❌ تعذر الوصول للميكروفون، تأكد من الإعدادات.");
+      setMessage(`❌ تعذر تشغيل المايك: ${err.message}`);
     }
   };
 
