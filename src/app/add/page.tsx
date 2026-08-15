@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, Suspense } from "react";
+import { useState, useRef, useEffect, Suspense } from "react";
 import { useRouter } from "next/navigation";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "@/db";
@@ -12,7 +12,8 @@ function AddExpenseContent() {
   const router = useRouter();
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
-  
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+
   const categories = useLiveQuery(() => db.categories.where('type').equals('expense').toArray());
   const settings = useLiveQuery(() => db.settings.get('user_settings'));
 
@@ -25,17 +26,24 @@ function AddExpenseContent() {
   const [merchant, setMerchant] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [note, setNote] = useState("");
-  
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState("");
   const [speechText, setSpeechText] = useState("");
-  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
+
+  // تنضيف المايك لو المستخدم غادر الصفحة وهو لسه بيسجل
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach(track => track.stop());
+    };
+  }, []);
 
   const toggleRecording = async () => {
-    if (isListening && mediaRecorder) {
-      mediaRecorder.stop();
+    if (isListening && mediaRecorderRef.current) {
+      setIsProcessing(true); // نظهر اللودينج فورًا لحظة الإيقاف، مش بعد ما onstop يشتغل
+      mediaRecorderRef.current.stop();
       setIsListening(false);
       setMessage("⏳ جاري تحويل الصوت لنص...");
       return;
@@ -44,7 +52,7 @@ function AddExpenseContent() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      
+
       const recorder = new MediaRecorder(stream);
       audioChunksRef.current = [];
 
@@ -53,15 +61,11 @@ function AddExpenseContent() {
       };
 
       recorder.onstop = async () => {
-        setIsProcessing(true);
-        
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach(track => track.stop());
-        }
+        streamRef.current?.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
 
         const actualMimeType = recorder.mimeType || 'audio/webm';
         const extension = actualMimeType.includes('mp4') ? 'mp4' : 'webm';
-        
         const audioBlob = new Blob(audioChunksRef.current, { type: actualMimeType });
 
         if (audioBlob.size < 1000) {
@@ -71,30 +75,21 @@ function AddExpenseContent() {
         }
 
         try {
-          const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-          if (!apiKey) throw new Error("مفتاح API غير متوفر!");
-
           const formData = new FormData();
           formData.append("file", audioBlob, `audio.${extension}`);
-          formData.append("model", "whisper-large-v3");
-          formData.append("language", "ar"); 
-          formData.append("prompt", "تسجيل صوتي لمصروفات يومية باللهجة المصرية والعربية العامية. كلمات مثل: دفعت، اشتريت، جبت، بـ، جنيه، ريال، مواصلات، كهرباء، فطار، غدا، عشا، فاتورة.");
 
-          const audioRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+          const audioRes = await fetch("/api/transcribe", {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${apiKey}` },
-            body: formData
+            body: formData,
           });
 
-          if (!audioRes.ok) {
-            const errorData = await audioRes.json().catch(() => ({}));
-            console.error("Groq Server Error:", errorData);
-            throw new Error(errorData.error?.message || `رفض من السيرفر برمز: ${audioRes.status}`);
-          }
-          
           const audioData = await audioRes.json();
+
+          if (!audioRes.ok || audioData.error) {
+            throw new Error(audioData.error || `رفض من السيرفر برمز: ${audioRes.status}`);
+          }
+
           const text = audioData.text;
-          
           if (!text || text.trim() === "") {
             setMessage("⚠️ لم يتم التقاط صوت واضح، جرب تعلي صوتك.");
             setIsProcessing(false);
@@ -113,7 +108,7 @@ function AddExpenseContent() {
       };
 
       recorder.start();
-      setMediaRecorder(recorder);
+      mediaRecorderRef.current = recorder;
       setIsListening(true);
       setMessage("🎙️ أنا سامعك... اتكلم براحتك.");
 
@@ -121,79 +116,53 @@ function AddExpenseContent() {
       console.error(err);
       const errMessage = err instanceof Error ? err.message : "تعذر الوصول للمايك";
       setMessage(`❌ تعذر تشغيل المايك: ${errMessage}`);
+      setIsProcessing(false);
     }
   };
 
   const processMultiExpenses = async (text: string) => {
     setMessage("🧠 جاري استخراج المصاريف...");
     try {
-      const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-      if (!apiKey) throw new Error("مفتاح API غير موجود");
-
-      const prompt = `أنت محاسب ذكي تفهم اللهجة المصرية العامية والعربية الفصحى بشكل ممتاز.
-النص التالي يحتوي على مصروفات سجلها المستخدم بصوته: "${text}".
-
-المطلوب:
-1. استخراج كل مصروف مذكور.
-2. تجاهل الكلمات الزائدة (مثل: دفعت، اشتريت، جبت، صرفت، بـ، جنيه، ريال).
-3. استخراج المبلغ (amount) كرقم، واسم المصروف (merchant) كنص واضح.
-4. قم بإرجاع كائن JSON فقط (ONLY JSON) يحتوي على مصفوفة باسم "expenses".
-
-مثال للرد المطلوب لو النص كان "جبت فطار بعشرين ومواصلات بـ 15 و 300 كهربا":
-{
-  "expenses": [
-    { "amount": 20, "merchant": "فطار" },
-    { "amount": 15, "merchant": "مواصلات" },
-    { "amount": 300, "merchant": "كهرباء" }
-  ]
-}`;
-
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      const response = await fetch("/api/ai-expense", {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0,
-          response_format: { type: "json_object" }
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
       });
 
-      if (!response.ok) throw new Error("فشل الاتصال بسيرفر التحليل.");
-
       const data = await response.json();
-      const aiText = data.choices?.[0]?.message?.content || '{"expenses": []}';
-      
-      const parsedData = JSON.parse(aiText);
-      const expenses = parsedData.expenses || [];
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "فشل الاتصال بسيرفر التحليل.");
+      }
 
-      if (!Array.isArray(expenses) || expenses.length === 0) {
+      const expenses = Array.isArray(data.expenses) ? data.expenses : [];
+
+      if (expenses.length === 0) {
         setMessage("⚠️ مقدرتش أستخرج مصاريف واضحة، جرب تاني.");
         setIsProcessing(false);
         return;
       }
 
       const defaultCategory = await db.categories.where('type').equals('expense').first();
-      
+
       for (const exp of expenses) {
+        // كانت بتتبعت type/notes وهي أسماء مش موجودة في addExpense، فالملاحظة كانت بتضيع دايماً - اتصلحت لـ source/note
         await addExpense({
           amount: Number(exp.amount),
           merchant: exp.merchant,
           categoryId: categoryId || defaultCategory?.id || "auto",
-          type: 'manual',
-          notes: `تسجيل صوتي: ${text}`
+          source: 'manual',
+          note: `تسجيل صوتي: ${text}`,
         });
       }
 
       setMessage(`✅ تم تسجيل ${expenses.length} معاملات بنجاح.`);
       setTimeout(() => router.push("/transactions"), 2000);
-      
+      setIsProcessing(false);
+
     } catch (error) {
       console.error("Parse Error:", error);
-      setMessage("❌ خطأ في فهم البيانات، حاول بكلمات أبسط.");
+      const errorMessage = error instanceof Error ? error.message : "خطأ في فهم البيانات، حاول بكلمات أبسط.";
+      setMessage(`❌ ${errorMessage}`);
       setIsProcessing(false);
     }
   };
@@ -206,8 +175,8 @@ function AddExpenseContent() {
         amount: Number(amount),
         merchant,
         categoryId,
-        type: 'manual',
-        notes: note
+        source: 'manual',
+        note,
       });
       router.push("/transactions");
     } catch (error) {
@@ -246,14 +215,14 @@ function AddExpenseContent() {
           <input type="number" step="0.01" required value={amount} onChange={(e) => setAmount(e.target.value)} className="flex-1 text-3xl font-bold bg-transparent outline-none" placeholder="0.00" />
         </div>
         <input type="text" required value={merchant} onChange={(e) => setMerchant(e.target.value)} className="w-full p-4 bg-white rounded-3xl text-lg font-medium outline-none shadow-sm" placeholder={t.merchant} />
-        
+
         <select required value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="w-full p-4 bg-white rounded-3xl text-lg font-medium outline-none shadow-sm">
           <option value="" disabled>{t.selectCategory}</option>
           {categories?.map((cat) => <option key={cat.id} value={cat.id}>{cat.icon} {cat.name}</option>)}
         </select>
 
         <input type="text" value={note} onChange={(e) => setNote(e.target.value)} className="w-full p-4 bg-white rounded-3xl text-lg outline-none shadow-sm" placeholder={t.note} />
-        
+
         <button type="submit" disabled={isSubmitting} className="w-full mt-4 bg-gray-900 text-white p-4 rounded-2xl font-bold text-lg">
           {isSubmitting ? "جاري الحفظ..." : t.save}
         </button>
