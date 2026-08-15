@@ -40,9 +40,53 @@ function AddExpenseContent() {
     };
   }, []);
 
+  function AddExpenseContent() {
+  const router = useRouter();
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStartRef = useRef<number>(0);
+
+  const categories = useLiveQuery(() => db.categories.where('type').equals('expense').toArray());
+  const settings = useLiveQuery(() => db.settings.get('user_settings'));
+
+  const dialect = settings?.dialect || 'en';
+  const currency = settings?.currency || 'SAR';
+  const t = translations[dialect]?.addExpense || translations['en'].addExpense;
+  const isRTL = dialect === 'egyptian';
+
+  const [amount, setAmount] = useState("");
+  const [merchant, setMerchant] = useState("");
+  const [categoryId, setCategoryId] = useState("");
+  const [note, setNote] = useState("");
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [message, setMessage] = useState("");
+  const [speechText, setSpeechText] = useState("");
+
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach(track => track.stop());
+    };
+  }, []);
+
+  // أفضل mimeType مدعوم فعليًا في المتصفح الحالي - iOS Safari بيحتاج audio/mp4
+  // بدل ما نسيب الاختيار للمتصفح لوحده وممكن يرجع Blob فاضي
+  const pickSupportedMimeType = (): string | undefined => {
+    const candidates = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'];
+    for (const type of candidates) {
+      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported?.(type)) {
+        return type;
+      }
+    }
+    return undefined; // نسيب المتصفح يختار الافتراضي لو ولا واحد مدعوم صراحةً
+  };
+
   const toggleRecording = async () => {
     if (isListening && mediaRecorderRef.current) {
-      setIsProcessing(true); // نظهر اللودينج فورًا لحظة الإيقاف، مش بعد ما onstop يشتغل
+      setIsProcessing(true);
       mediaRecorderRef.current.stop();
       setIsListening(false);
       setMessage("⏳ جاري تحويل الصوت لنص...");
@@ -53,8 +97,10 @@ function AddExpenseContent() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const recorder = new MediaRecorder(stream);
+      const mimeType = pickSupportedMimeType();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       audioChunksRef.current = [];
+      recordingStartRef.current = Date.now();
 
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
@@ -64,12 +110,15 @@ function AddExpenseContent() {
         streamRef.current?.getTracks().forEach(track => track.stop());
         streamRef.current = null;
 
-        const actualMimeType = recorder.mimeType || 'audio/webm';
-        const extension = actualMimeType.includes('mp4') ? 'mp4' : 'webm';
+        const durationMs = Date.now() - recordingStartRef.current;
+        const actualMimeType = recorder.mimeType || mimeType || 'audio/webm';
+        const extension = actualMimeType.includes('mp4') ? 'mp4' : actualMimeType.includes('ogg') ? 'ogg' : 'webm';
         const audioBlob = new Blob(audioChunksRef.current, { type: actualMimeType });
 
-        if (audioBlob.size < 1000) {
-          setMessage("⚠️ التسجيل كان قصير جداً، حاول تتكلم بوضوح أكتر.");
+        // بنعتمد على المدة الفعلية للتسجيل مش حجم البايتات بس،
+        // لأن الحجم بيختلف حسب الـ codec وممكن يبان "صغير" حتى لو الصوت واضح
+        if (durationMs < 600 || audioBlob.size < 500) {
+          setMessage("⚠️ التسجيل كان قصير جداً، حاول تتكلم بوضوح أكتر واستنى ثانية قبل ما توقف.");
           setIsProcessing(false);
           return;
         }
@@ -107,7 +156,8 @@ function AddExpenseContent() {
         }
       };
 
-      recorder.start();
+      // timeslice بيخلي الـ chunks تتجمع كل 250ms بدل ما تستنى للنهاية بس - أكثر ثباتًا على iOS
+      recorder.start(250);
       mediaRecorderRef.current = recorder;
       setIsListening(true);
       setMessage("🎙️ أنا سامعك... اتكلم براحتك.");
