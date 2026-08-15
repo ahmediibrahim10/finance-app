@@ -10,7 +10,8 @@ import { translations } from "@/utils/i18n";
 
 function AddExpenseContent() {
   const router = useRouter();
-  const recognitionRef = useRef<any>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
   
   const categories = useLiveQuery(() => db.categories.where('type').equals('expense').toArray());
   const settings = useLiveQuery(() => db.settings.get('user_settings'));
@@ -29,64 +30,94 @@ function AddExpenseContent() {
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState("");
-  const [speechText, setSpeechText] = useState(""); 
+  const [speechText, setSpeechText] = useState("");
+  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
 
-  const toggleListening = () => {
-    if (isListening) {
-      recognitionRef.current?.stop();
+  // الحل الدائم: التسجيل المباشر وإرساله لـ Groq Whisper
+  const toggleRecording = async () => {
+    if (isListening && mediaRecorder) {
+      // إيقاف التسجيل
+      mediaRecorder.stop();
       setIsListening(false);
-      if (speechText.trim()) processMultiExpenses(speechText);
+      setMessage("⏳ جاري تحويل الصوت لنص...");
       return;
     }
 
-    // @ts-ignore - Ignore window typing for speech recognition
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("متصفحك لا يدعم تسجيل الصوت.");
-      return;
-    }
-    
-    const recognition = new SpeechRecognition();
-    recognition.lang = isRTL ? 'ar-EG' : 'ar-SA'; 
-    recognition.continuous = true;
-    recognition.interimResults = true; 
-
-    // @ts-ignore
-    recognition.onresult = (event) => {
-      let currentText = "";
-      for (let i = 0; i < event.results.length; i++) currentText += event.results[i][0].transcript;
-      setSpeechText(currentText);
-    };
-
-    // @ts-ignore
-    recognition.onerror = (event) => {
-      if (event.error !== 'aborted') {
-        setIsListening(false);
-        setMessage("❌ خطأ مايك: " + event.error);
-      }
-    };
-
-    recognitionRef.current = recognition;
     try {
-      recognition.start();
+      // طلب إذن المايك بطريقة آمنة ومستقرة
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        setIsProcessing(true);
+        // تجميع الصوت في ملف
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/mp4' });
+        const file = new File([audioBlob], "audio.mp4", { type: "audio/mp4" });
+
+        // إغلاق المايك من الخلفية عشان مايفضلش شغال
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(track => track.stop());
+        }
+
+        try {
+          const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+          if (!apiKey) throw new Error("مفتاح API غير موجود");
+
+          // 1. إرسال الصوت لـ Groq لتحويله لنص
+          const formData = new FormData();
+          formData.append("file", file);
+          formData.append("model", "whisper-large-v3");
+
+          const audioRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+            body: formData
+          });
+
+          if (!audioRes.ok) throw new Error("فشل تحويل الصوت");
+          
+          const audioData = await audioRes.json();
+          const text = audioData.text;
+          
+          if (!text || text.trim() === "") {
+            setMessage("⚠️ لم يتم التقاط صوت واضح.");
+            setIsProcessing(false);
+            return;
+          }
+
+          setSpeechText(text);
+          
+          // 2. إرسال النص لـ الذكاء الاصطناعي لاستخراج المصاريف
+          await processMultiExpenses(text);
+
+        } catch (error: any) {
+          setMessage("❌ حدث خطأ في معالجة الصوت.");
+          setIsProcessing(false);
+        }
+      };
+
+      recorder.start();
+      setMediaRecorder(recorder);
       setIsListening(true);
-      setMessage("🎙️ أنا سامعك... خد راحتك في الكلام.");
-    } catch (e) {
-      setMessage("❌ تعذر تشغيل الميكروفون.");
+      setMessage("🎙️ أنا سامعك... اتكلم دلوقتي.");
+
+    } catch (err) {
+      console.error(err);
+      setMessage("❌ تعذر الوصول للميكروفون، تأكد من الإعدادات.");
     }
   };
 
   const processMultiExpenses = async (text: string) => {
-    setIsProcessing(true);
-    setMessage("🧠 جاري التحليل...");
-    
+    setMessage("🧠 جاري استخراج المصاريف...");
     try {
       const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-
-      if (!apiKey) {
-        throw new Error("مفتاح API غير موجود في إعدادات التطبيق.");
-      }
-
       const prompt = `Extract expenses from this text: "${text}". 
 Return ONLY a valid JSON array of objects. Format: [{"amount": number, "merchant": "string"}]. 
 If no expense found, return []. No markdown, no extra text.`;
@@ -104,9 +135,7 @@ If no expense found, return []. No markdown, no extra text.`;
         })
       });
 
-      if (!response.ok) {
-        throw new Error("فشل الاتصال بسيرفر الذكاء الاصطناعي.");
-      }
+      if (!response.ok) throw new Error("فشل الاتصال بسيرفر التحليل.");
 
       const data = await response.json();
       const aiText = data.choices?.[0]?.message?.content || "[]";
@@ -172,16 +201,16 @@ If no expense found, return []. No markdown, no extra text.`;
 
       {speechText && (
         <div className="mb-4 p-4 bg-white border border-blue-100 rounded-2xl shadow-sm">
-          <p className="text-xs text-blue-500 font-bold mb-1">🎙️ المايك بيسمع:</p>
+          <p className="text-xs text-blue-500 font-bold mb-1">🎙️ فهمت الآتي:</p>
           <p className="text-gray-800 font-medium leading-relaxed">{speechText}</p>
         </div>
       )}
 
       {message && <div className="mb-4 p-3 rounded-xl bg-blue-100 text-blue-700 font-medium text-center shadow-sm">{message}</div>}
 
-      <button onClick={toggleListening} className={`w-full p-4 rounded-3xl mb-6 font-bold text-lg flex items-center justify-center gap-2 shadow-sm ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-black text-white'}`}>
+      <button onClick={toggleRecording} className={`w-full p-4 rounded-3xl mb-6 font-bold text-lg flex items-center justify-center gap-2 shadow-sm ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-black text-white'}`}>
         {isProcessing ? <Loader2 className="animate-spin" /> : isListening ? <Square /> : <Mic />}
-        {isListening ? "إيقاف وإرسال" : "سجل مصروفك بالصوت (AI)"}
+        {isListening ? "إيقاف التسجيل وإرسال" : "سجل مصروفك بالصوت (AI)"}
       </button>
 
       <form onSubmit={handleSubmit} className="flex-1 flex flex-col gap-4">
