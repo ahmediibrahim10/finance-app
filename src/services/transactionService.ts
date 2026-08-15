@@ -1,106 +1,93 @@
-import { db } from '@/db';
-import { Transaction } from '@/types/models';
-import { toMinorUnits } from '@/utils/currency';
+import { db } from "@/db";
+import { Transaction } from "@/types/models";
+import { toMinorUnits } from "@/utils/currency";
 
-export interface AddExpenseInput {
-  amount: string | number;
-  merchant: string;
-  categoryId: string;
-  source?: 'manual' | 'sms';
-  note?: string;
-  referenceId?: string;
-}
-
-function normalizeMerchant(value: string): string {
-  return value.trim().replace(/\s+/g, ' ');
-}
-
-function makeFingerprint(
-  merchant: string,
-  amountMinor: number,
-  source: 'manual' | 'sms',
-  referenceId?: string,
-): string {
-  return referenceId || `${source}:${merchant.toLowerCase()}:${amountMinor}:${Date.now()}`;
-}
-
-export async function addExpense(input: AddExpenseInput): Promise<Transaction | null>;
 export async function addExpense(
   amount: string | number,
   merchant: string,
   categoryId: string,
-  source?: 'manual' | 'sms',
-  note?: string,
-  referenceId?: string,
-): Promise<Transaction | null>;
-export async function addExpense(
-  inputOrAmount: AddExpenseInput | string | number,
-  merchantArg?: string,
-  categoryIdArg?: string,
-  sourceArg: 'manual' | 'sms' = 'manual',
-  noteArg = '',
-  referenceIdArg?: string,
+  source: "manual" | "sms" = "manual",
+  note = "",
+  referenceId?: string
 ): Promise<Transaction | null> {
-  const input: AddExpenseInput =
-    typeof inputOrAmount === 'object'
-      ? inputOrAmount
-      : {
-          amount: inputOrAmount,
-          merchant: merchantArg ?? '',
-          categoryId: categoryIdArg ?? '',
-          source: sourceArg,
-          note: noteArg,
-          referenceId: referenceIdArg,
-        };
+  const cleanMerchant = merchant.trim();
+  const amountMinor = toMinorUnits(amount);
+  const now = Date.now();
 
-  const merchant = normalizeMerchant(input.merchant);
-  const amountMinor = toMinorUnits(input.amount);
-  const source = input.source ?? 'manual';
-
-  if (!merchant || !input.categoryId || !Number.isFinite(amountMinor) || amountMinor <= 0) {
-    throw new Error('Invalid expense data.');
+  if (!cleanMerchant || amountMinor <= 0 || !Number.isFinite(amountMinor)) {
+    throw new Error("بيانات المصروف غير صالحة.");
   }
 
-  if (source === 'sms') {
-    if (input.referenceId) {
-      const existing = await db.transactions
-        .where('fingerprint')
-        .equals(input.referenceId)
-        .first();
+  if (source === "sms" && referenceId) {
+    const existing = await db.transactions
+      .where("fingerprint")
+      .equals(referenceId)
+      .first();
 
-      if (existing) return null;
-    } else {
-      const oneHourAgo = Date.now() - 60 * 60 * 1000;
-      const recent = await db.transactions.where('date').above(oneHourAgo).toArray();
-      const duplicate = recent.some(
-        tx =>
-          tx.source === 'sms' &&
-          tx.amountMinor === amountMinor &&
-          normalizeMerchant(tx.merchant).toLowerCase() === merchant.toLowerCase(),
-      );
-
-      if (duplicate) return null;
+    if (existing) {
+      return null;
     }
   }
 
-  const now = Date.now();
-  const transaction: Transaction = {
+  if (source === "sms" && !referenceId) {
+    const oneHourAgo = now - 60 * 60 * 1000;
+    const recent = await db.transactions
+      .where("date")
+      .above(oneHourAgo)
+      .toArray();
+
+    const duplicate = recent.some(
+      (tx) =>
+        tx.merchant.toLowerCase() === cleanMerchant.toLowerCase() &&
+        tx.amountMinor === amountMinor &&
+        tx.source === "sms"
+    );
+
+    if (duplicate) return null;
+  }
+
+  const fingerprint =
+    referenceId ||
+    `${source}:${cleanMerchant.toLowerCase()}:${amountMinor}:${now}`;
+
+  const newTransaction: Transaction = {
     id: crypto.randomUUID(),
     amountMinor,
-    currency: (await db.settings.get('user_settings'))?.currency || 'SAR',
-    merchant,
-    categoryId: input.categoryId,
+    currency: "SAR",
+    merchant: cleanMerchant,
+    categoryId,
     date: now,
     source,
-    type: 'expense',
-    note: input.note?.trim() || '',
-    fingerprint: makeFingerprint(merchant, amountMinor, source, input.referenceId),
+    type: "expense",
+    note,
+    fingerprint,
     createdAt: now,
     updatedAt: now,
   };
 
-  await db.transactions.add(transaction);
-  return transaction;
+  await db.transaction(
+    "rw",
+    db.transactions,
+    db.fixedExpenses,
+    async () => {
+      await db.transactions.add(newTransaction);
+
+      const fixedExpenses = await db.fixedExpenses.toArray();
+      const matchingFixed = fixedExpenses.find(
+        (expense) =>
+          expense.amountMinor === amountMinor ||
+          expense.name.toLowerCase().includes(cleanMerchant.toLowerCase())
+      );
+
+      if (matchingFixed) {
+        await db.fixedExpenses.update(matchingFixed.id, {
+          lastPaidDate: now,
+        });
+      }
+    }
+  );
+
+  return newTransaction;
 }
 
 export async function updateExpense(
@@ -108,25 +95,25 @@ export async function updateExpense(
   amount: string | number,
   merchant: string,
   categoryId: string,
-  note = '',
+  note = ""
 ): Promise<void> {
   const amountMinor = toMinorUnits(amount);
-  const normalizedMerchant = normalizeMerchant(merchant);
+  const cleanMerchant = merchant.trim();
 
-  if (!id || !normalizedMerchant || !categoryId || !Number.isFinite(amountMinor) || amountMinor <= 0) {
-    throw new Error('Invalid expense data.');
+  if (!id || !cleanMerchant || amountMinor <= 0) {
+    throw new Error("بيانات التعديل غير صالحة.");
   }
 
   await db.transactions.update(id, {
     amountMinor,
-    merchant: normalizedMerchant,
+    merchant: cleanMerchant,
     categoryId,
-    note: note.trim(),
+    note,
     updatedAt: Date.now(),
   });
 }
 
 export async function deleteExpense(id: string): Promise<void> {
-  if (!id) throw new Error('Transaction id is required.');
+  if (!id) throw new Error("معرف المصروف غير صالح.");
   await db.transactions.delete(id);
 }

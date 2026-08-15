@@ -1,0 +1,96 @@
+"use client";
+
+import { useEffect, useState, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from '@/db';
+import { updateExpense, deleteExpense } from '@/services/transactionService';
+import { ArrowLeft, Trash2 } from 'lucide-react';
+
+function EditExpenseForm() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const transactionId = searchParams.get('id');
+
+  const categories = useLiveQuery(() => db.categories.where('type').equals('expense').toArray());
+  const transaction = useLiveQuery(
+    () => transactionId ? db.transactions.get(transactionId) : undefined,
+    [transactionId],
+  );
+
+  const [amount, setAmount] = useState('');
+  const [merchant, setMerchant] = useState('');
+  const [categoryId, setCategoryId] = useState('');
+  const [note, setNote] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!transaction) return;
+    setAmount((transaction.amountMinor / 100).toFixed(2));
+    setMerchant(transaction.merchant);
+    setCategoryId(transaction.categoryId);
+    setNote(transaction.note || '');
+  }, [transaction]);
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!transactionId || isSubmitting) return;
+
+    setIsSubmitting(true);
+    try {
+      await updateExpense(transactionId, amount, merchant, categoryId, note);
+      router.push('/transactions');
+    } catch (error) {
+      console.error(error);
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!transactionId) return;
+    if (!window.confirm('هل أنت متأكد من حذف هذا المصروف؟')) return;
+    try {
+      await deleteExpense(transactionId);
+      router.push('/transactions');
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  if (!transactionId) return <div className="p-4 pt-safe text-center">Invalid Transaction ID</div>;
+  if (!transaction) return <div className="p-4 pt-safe text-center text-gray-500">Loading transaction details...</div>;
+
+  return (
+    <div className="p-4 pt-safe pb-28 min-h-screen flex flex-col bg-gray-50">
+      <header className="py-2 mb-6 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button onClick={() => router.back()} className="p-2 -ml-2 bg-white rounded-full shadow-sm">
+            <ArrowLeft size={20} />
+          </button>
+          <h1 className="text-2xl font-bold">Edit Expense</h1>
+        </div>
+        <button onClick={handleDelete} className="p-2 bg-red-50 text-red-600 rounded-full">
+          <Trash2 size={20} />
+        </button>
+      </header>
+
+      <form onSubmit={handleSubmit} className="flex-1 flex flex-col gap-4">
+        <input type="number" step="0.01" min="0.01" inputMode="decimal" required value={amount} onChange={e => setAmount(e.target.value)} className="bg-white p-4 rounded-3xl text-3xl font-bold outline-none" />
+        <input type="text" required value={merchant} onChange={e => setMerchant(e.target.value)} className="bg-white p-4 rounded-3xl text-lg font-medium outline-none" placeholder="Merchant Name" />
+        <select required value={categoryId} onChange={e => setCategoryId(e.target.value)} className="bg-white p-4 rounded-3xl text-lg font-medium outline-none">
+          <option value="" disabled>Select Category</option>
+          {categories?.map(cat => <option key={cat.id} value={cat.id}>{cat.icon} {cat.name}</option>)}
+        </select>
+        <input type="text" value={note} onChange={e => setNote(e.target.value)} className="bg-white p-4 rounded-3xl outline-none" placeholder="Note" />
+        <div className="flex-1" />
+        <button type="submit" disabled={isSubmitting} className="w-full bg-black text-white p-4 rounded-2xl font-bold text-lg disabled:opacity-50">
+          {isSubmitting ? 'Saving...' : 'Update Transaction'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+export default function EditExpensePage() {
+  return <Suspense fallback={<div className="p-4 pt-safe text-center">Loading module...</div>}><EditExpenseForm /></Suspense>;
+}
