@@ -1,74 +1,74 @@
 import { NextResponse } from 'next/server';
 
+function cleanJson(text: string): unknown[] {
+  const match = text.match(/\[[\s\S]*\]/);
+  if (!match) return [];
+  try {
+    const parsed = JSON.parse(match[0]);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const { text } = await request.json();
 
-    if (!text || typeof text !== 'string' || !text.trim()) {
-      return NextResponse.json({ expenses: [], error: 'النص فارغ.' }, { status: 200 });
+    if (typeof text !== 'string' || !text.trim()) {
+      return NextResponse.json({ expenses: [] });
     }
 
-    const apiKey = process.env.GROQ_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
     if (!apiKey) {
-      return NextResponse.json({ expenses: [], error: 'GROQ_API_KEY غير مضبوط على السيرفر.' }, { status: 200 });
+      return NextResponse.json({ error: 'مفتاح الـ API غير موجود على السيرفر.' }, { status: 500 });
     }
 
-    const prompt = `أنت محاسب ذكي تفهم اللهجة المصرية العامية والعربية الفصحى بشكل ممتاز.
-النص التالي يحتوي على مصروفات سجلها المستخدم بصوته: "${text}".
+    const prompt = `You are a financial expense extraction engine.
+Extract every clear expense from the following Arabic/Egyptian Arabic text.
 
-المطلوب:
-1. استخراج كل مصروف مذكور.
-2. تجاهل الكلمات الزائدة (مثل: دفعت، اشتريت، جبت، صرفت، بـ، جنيه، ريال).
-3. استخراج المبلغ (amount) كرقم، واسم المصروف (merchant) كنص واضح.
-4. قم بإرجاع كائن JSON فقط (ONLY JSON) يحتوي على مصفوفة باسم "expenses".
+Rules:
+- Return ONLY a JSON array.
+- Each item must be {"amount": number, "merchant": "string"}.
+- Amount must be a positive number in the spoken currency units.
+- Do not invent amounts or merchants.
+- Ignore income, balances, transfers, and unclear numbers.
+- If there are no clear expenses, return [].
 
-مثال للرد المطلوب لو النص كان "جبت فطار بعشرين ومواصلات بـ 15 و 300 كهربا":
-{
-  "expenses": [
-    { "amount": 20, "merchant": "فطار" },
-    { "amount": 15, "merchant": "مواصلات" },
-    { "amount": 300, "merchant": "كهرباء" }
-  ]
-}`;
+Text:
+${JSON.stringify(text)}`;
 
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1 },
+        }),
       },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0,
-        response_format: { type: 'json_object' },
-      }),
-    });
-
-    if (!response.ok) {
-      const errBody = await response.json().catch(() => ({}));
-      console.error('Groq chat error:', response.status, errBody);
-      return NextResponse.json(
-        { expenses: [], error: errBody?.error?.message || `فشل الاتصال بسيرفر التحليل (${response.status}).` },
-        { status: 200 }
-      );
-    }
+    );
 
     const data = await response.json();
-    const aiText = data.choices?.[0]?.message?.content || '{"expenses": []}';
-
-    let parsed: any = { expenses: [] };
-    try {
-      parsed = JSON.parse(aiText);
-    } catch {
-      const match = aiText.match(/\[[\s\S]*\]/);
-      parsed = { expenses: match ? JSON.parse(match[0]) : [] };
+    if (!response.ok) {
+      throw new Error(data.error?.message || 'خطأ من مزود الذكاء الاصطناعي.');
     }
 
-    const expenses = Array.isArray(parsed.expenses) ? parsed.expenses : [];
+    const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+    const expenses = cleanJson(aiText)
+      .map(item => ({
+        amount: Number((item as any)?.amount),
+        merchant: String((item as any)?.merchant || '').trim(),
+      }))
+      .filter(item => Number.isFinite(item.amount) && item.amount > 0 && item.merchant);
+
     return NextResponse.json({ expenses });
-  } catch (error: any) {
-    console.error('ai-expense route error:', error);
-    return NextResponse.json({ expenses: [], error: error?.message || 'Unknown error' }, { status: 200 });
+  } catch (error) {
+    console.error('AI expense error:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'خطأ داخلي في الخادم.' },
+      { status: 500 },
+    );
   }
 }

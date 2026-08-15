@@ -1,13 +1,5 @@
-// src/features/engine/financialEngine.ts
-
 import { db } from '@/db';
-import { 
-  startOfMonth, 
-  endOfMonth, 
-  differenceInDays, 
-  startOfDay, 
-  endOfDay 
-} from 'date-fns';
+import { startOfMonth, endOfMonth, differenceInCalendarDays, startOfDay, endOfDay } from 'date-fns';
 
 export interface DailyFinancialStatus {
   safeToSpend: number;
@@ -16,70 +8,86 @@ export interface DailyFinancialStatus {
   status: 'SAFE' | 'WARNING' | 'DANGER';
 }
 
-export async function calculateSafeToSpend(): Promise<DailyFinancialStatus> {
-  const now = new Date();
-  
-  // 1. جلب الإعدادات (الدخل الشهري)
+export async function calculateSafeToSpend(now = new Date()): Promise<DailyFinancialStatus> {
   const settings = await db.settings.get('user_settings');
-  const income = settings?.monthlyIncome || 0;
+  const incomeMinor = settings?.monthlyIncomeMinor ?? 0;
 
-  // 2. جلب المصاريف الثابتة
-  const fixedExpenses = await db.fixedExpenses.toArray();
-  const totalFixed = fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
-
-  // 3. حسابات التواريخ (بداية ونهاية الشهر)
   const monthStart = startOfMonth(now);
   const monthEnd = endOfMonth(now);
-  const totalDaysInMonth = differenceInDays(monthEnd, monthStart) + 1;
-  const daysPassedBeforeToday = differenceInDays(now, monthStart); 
-  const remainingDays = totalDaysInMonth - daysPassedBeforeToday; // يشمل اليوم الحالي
-
-  // 4. جلب كل عمليات الصرف لهذا الشهر
-  const transactions = await db.transactions
-    .where('date')
-    .between(monthStart, monthEnd, true, true)
-    .filter(t => t.type === 'expense')
-    .toArray();
-
-  // 5. فصل المصاريف (ما قبل اليوم VS اليوم)
   const todayStart = startOfDay(now);
   const todayEnd = endOfDay(now);
 
-  let spentBeforeToday = 0;
-  let spentToday = 0;
+  const fixedExpenses = await db.fixedExpenses.toArray();
+  const monthlyFixedMinor = fixedExpenses.reduce(
+    (sum, expense) => sum + (Number(expense.amountMinor) || 0),
+    0,
+  );
 
-  transactions.forEach(t => {
-    if (t.date >= todayStart && t.date <= todayEnd) {
-      spentToday += t.amount;
-    } else if (t.date < todayStart) {
-      spentBeforeToday += t.amount;
-    }
-  });
+  const transactions = await db.transactions
+    .where('date')
+    .between(monthStart.getTime(), monthEnd.getTime(), true, true)
+    .filter(t => t.type === 'expense')
+    .toArray();
 
-  // 6. الحسابات المالية (Financial Math)
-  const discretionaryBudget = income - totalFixed;
-  const remainingMoneyForRestOfMonth = discretionaryBudget - spentBeforeToday;
+  const spentBeforeTodayMinor = transactions
+    .filter(t => t.date < todayStart.getTime())
+    .reduce((sum, t) => sum + (Number(t.amountMinor) || 0), 0);
 
-  // الحد الآمن لليوم
-  const safeToSpend = remainingDays > 0 
-    ? remainingMoneyForRestOfMonth / remainingDays 
-    : remainingMoneyForRestOfMonth;
+  const spentTodayMinor = transactions
+    .filter(t => t.date >= todayStart.getTime() && t.date <= todayEnd.getTime())
+    .reduce((sum, t) => sum + (Number(t.amountMinor) || 0), 0);
 
-  const remainingToday = safeToSpend - spentToday;
+  // Fixed obligations are already reserved from income, so paid fixed
+  // transactions must not be counted a second time.
+  const fixedPaidThisMonthMinor = fixedExpenses.reduce((sum, fixed) => {
+    const paid = fixed.lastPaidDate
+      ? fixed.lastPaidDate >= monthStart.getTime() && fixed.lastPaidDate <= monthEnd.getTime()
+      : false;
+    return sum + (paid ? Number(fixed.amountMinor) || 0 : 0);
+  }, 0);
 
-  // 7. تحديد الحالة (Status)
-  let status: 'SAFE' | 'WARNING' | 'DANGER' = 'SAFE';
-  
-  if (remainingToday < 0) {
-    status = 'DANGER'; // صرفت أكثر من المسموح لليوم
-  } else if (remainingToday < (safeToSpend * 0.2)) {
-    status = 'WARNING'; // تبقى أقل من 20% من ميزانية اليوم
+  const discretionaryBudgetMinor = Math.max(0, incomeMinor - monthlyFixedMinor);
+  const discretionarySpentBeforeTodayMinor = Math.max(
+    0,
+    spentBeforeTodayMinor - fixedPaidThisMonthMinor,
+  );
+
+  const remainingDiscretionaryMinor =
+    discretionaryBudgetMinor - discretionarySpentBeforeTodayMinor;
+
+  const totalDays = differenceInCalendarDays(monthEnd, monthStart) + 1;
+  const daysRemainingIncludingToday =
+    differenceInCalendarDays(monthEnd, todayStart) + 1;
+
+  const safeToSpendMinor =
+    daysRemainingIncludingToday > 0
+      ? remainingDiscretionaryMinor / daysRemainingIncludingToday
+      : remainingDiscretionaryMinor;
+
+  // Today's transactions should be compared against today's allowance.
+  // Do not subtract fixed payments twice because they are already reserved.
+  const fixedPaidTodayMinor = fixedExpenses.reduce((sum, fixed) => {
+    const paidToday =
+      fixed.lastPaidDate != null &&
+      fixed.lastPaidDate >= todayStart.getTime() &&
+      fixed.lastPaidDate <= todayEnd.getTime();
+    return sum + (paidToday ? Number(fixed.amountMinor) || 0 : 0);
+  }, 0);
+
+  const discretionarySpentTodayMinor = Math.max(0, spentTodayMinor - fixedPaidTodayMinor);
+  const remainingTodayMinor = safeToSpendMinor - discretionarySpentTodayMinor;
+
+  let status: DailyFinancialStatus['status'] = 'SAFE';
+  if (remainingTodayMinor < 0) {
+    status = 'DANGER';
+  } else if (safeToSpendMinor > 0 && remainingTodayMinor < safeToSpendMinor * 0.2) {
+    status = 'WARNING';
   }
 
   return {
-    safeToSpend: Number(safeToSpend.toFixed(2)),
-    spentToday: Number(spentToday.toFixed(2)),
-    remainingToday: Number(remainingToday.toFixed(2)),
-    status
+    safeToSpend: Number((safeToSpendMinor / 100).toFixed(2)),
+    spentToday: Number((discretionarySpentTodayMinor / 100).toFixed(2)),
+    remainingToday: Number((remainingTodayMinor / 100).toFixed(2)),
+    status,
   };
 }
