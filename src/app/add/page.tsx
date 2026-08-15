@@ -33,10 +33,9 @@ function AddExpenseContent() {
   const [speechText, setSpeechText] = useState("");
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
 
-  // الحل الدائم: التسجيل المباشر وإرساله لـ Groq Whisper
+  // التسجيل المباشر وإرساله لـ Groq Whisper مع توجيه اللهجة
   const toggleRecording = async () => {
     if (isListening && mediaRecorder) {
-      // إيقاف التسجيل
       mediaRecorder.stop();
       setIsListening(false);
       setMessage("⏳ جاري تحويل الصوت لنص...");
@@ -44,7 +43,6 @@ function AddExpenseContent() {
     }
 
     try {
-      // طلب إذن المايك بطريقة آمنة ومستقرة
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       
@@ -57,11 +55,9 @@ function AddExpenseContent() {
 
       recorder.onstop = async () => {
         setIsProcessing(true);
-        // تجميع الصوت في ملف
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/mp4' });
         const file = new File([audioBlob], "audio.mp4", { type: "audio/mp4" });
 
-        // إغلاق المايك من الخلفية عشان مايفضلش شغال
         if (streamRef.current) {
           streamRef.current.getTracks().forEach(track => track.stop());
         }
@@ -70,10 +66,12 @@ function AddExpenseContent() {
           const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
           if (!apiKey) throw new Error("مفتاح API غير موجود");
 
-          // 1. إرسال الصوت لـ Groq لتحويله لنص
           const formData = new FormData();
           formData.append("file", file);
           formData.append("model", "whisper-large-v3");
+          formData.append("language", "ar"); 
+          // التلميح لضبط استماع اللهجة المصرية والعامية
+          formData.append("prompt", "تسجيل صوتي لمصروفات يومية باللهجة المصرية والعربية العامية. كلمات مثل: دفعت، اشتريت، جبت، بـ، جنيه، ريال، مواصلات، كهرباء، فطار، غدا، عشا، فاتورة.");
 
           const audioRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
             method: 'POST',
@@ -93,8 +91,6 @@ function AddExpenseContent() {
           }
 
           setSpeechText(text);
-          
-          // 2. إرسال النص لـ الذكاء الاصطناعي لاستخراج المصاريف
           await processMultiExpenses(text);
 
         } catch (error: any) {
@@ -106,7 +102,7 @@ function AddExpenseContent() {
       recorder.start();
       setMediaRecorder(recorder);
       setIsListening(true);
-      setMessage("🎙️ أنا سامعك... اتكلم دلوقتي.");
+      setMessage("🎙️ أنا سامعك... اتكلم براحتك مصري أو عامية.");
 
     } catch (err) {
       console.error(err);
@@ -120,18 +116,26 @@ function AddExpenseContent() {
       const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
       if (!apiKey) throw new Error("مفتاح API غير موجود");
 
-      // أمر جديد وذكي موجه خصيصاً للغة العربية
-      const prompt = `أنت مساعد مالي ذكي. استخرج المصروفات من النص التالي: "${text}".
-استخرج المبلغ (amount) كـ رقم، واسم المصروف أو الجهة (merchant) كـ نص.
-قم بإرجاع كائن JSON فقط (ONLY JSON) يحتوي على مصفوفة باسم "expenses".
-مثال للرد المطلوب:
+      // توجيه صارم للموديل عشان يفهم العامية والمصري ويرجع JSON
+      const prompt = `أنت محاسب ذكي تفهم اللهجة المصرية العامية والعربية الفصحى بشكل ممتاز.
+النص التالي يحتوي على مصروفات سجلها المستخدم بصوته: "${text}".
+
+المطلوب:
+1. استخراج كل مصروف مذكور.
+2. تجاهل الكلمات الزائدة (مثل: دفعت، اشتريت، جبت، صرفت، بـ، جنيه، ريال).
+3. استخراج المبلغ (amount) كرقم، واسم المصروف (merchant) كنص واضح.
+4. قم بإرجاع كائن JSON فقط (ONLY JSON) يحتوي على مصفوفة باسم "expenses".
+
+مثال للرد المطلوب لو النص كان "جبت فطار بعشرين ومواصلات بـ 15 و 300 كهربا":
 {
   "expenses": [
+    { "amount": 20, "merchant": "فطار" },
+    { "amount": 15, "merchant": "مواصلات" },
     { "amount": 300, "merchant": "كهرباء" }
   ]
 }`;
 
-      const response = await fetch("[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)", {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -140,8 +144,8 @@ function AddExpenseContent() {
         body: JSON.stringify({
           model: "llama-3.3-70b-versatile",
           messages: [{ role: "user", content: prompt }],
-          temperature: 0, // صفر عشان نمنع أي إبداع ونركز على الدقة
-          response_format: { type: "json_object" } // 👈 السطر السحري اللي بيمنع أي خطأ
+          temperature: 0,
+          response_format: { type: "json_object" }
         })
       });
 
@@ -150,7 +154,6 @@ function AddExpenseContent() {
       const data = await response.json();
       const aiText = data.choices?.[0]?.message?.content || '{"expenses": []}';
       
-      // هنا بقى الـ JSON بييجي سليم ومضمون فبنقرأه مباشرة
       const parsedData = JSON.parse(aiText);
       const expenses = parsedData.expenses || [];
 
@@ -182,6 +185,7 @@ function AddExpenseContent() {
       setIsProcessing(false);
     }
   };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
