@@ -118,11 +118,20 @@ function AddExpenseContent() {
     setMessage("🧠 جاري استخراج المصاريف...");
     try {
       const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-      const prompt = `Extract expenses from this text: "${text}". 
-Return ONLY a valid JSON array of objects. Format: [{"amount": number, "merchant": "string"}]. 
-If no expense found, return []. No markdown, no extra text.`;
+      if (!apiKey) throw new Error("مفتاح API غير موجود");
 
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      // أمر جديد وذكي موجه خصيصاً للغة العربية
+      const prompt = `أنت مساعد مالي ذكي. استخرج المصروفات من النص التالي: "${text}".
+استخرج المبلغ (amount) كـ رقم، واسم المصروف أو الجهة (merchant) كـ نص.
+قم بإرجاع كائن JSON فقط (ONLY JSON) يحتوي على مصفوفة باسم "expenses".
+مثال للرد المطلوب:
+{
+  "expenses": [
+    { "amount": 300, "merchant": "كهرباء" }
+  ]
+}`;
+
+      const response = await fetch("[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)", {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -131,17 +140,19 @@ If no expense found, return []. No markdown, no extra text.`;
         body: JSON.stringify({
           model: "llama-3.3-70b-versatile",
           messages: [{ role: "user", content: prompt }],
-          temperature: 0.1
+          temperature: 0, // صفر عشان نمنع أي إبداع ونركز على الدقة
+          response_format: { type: "json_object" } // 👈 السطر السحري اللي بيمنع أي خطأ
         })
       });
 
       if (!response.ok) throw new Error("فشل الاتصال بسيرفر التحليل.");
 
       const data = await response.json();
-      const aiText = data.choices?.[0]?.message?.content || "[]";
+      const aiText = data.choices?.[0]?.message?.content || '{"expenses": []}';
       
-      const match = aiText.match(/\[[\s\S]*\]/);
-      const expenses = match ? JSON.parse(match[0]) : [];
+      // هنا بقى الـ JSON بييجي سليم ومضمون فبنقرأه مباشرة
+      const parsedData = JSON.parse(aiText);
+      const expenses = parsedData.expenses || [];
 
       if (!Array.isArray(expenses) || expenses.length === 0) {
         setMessage("⚠️ مقدرتش أستخرج مصاريف واضحة، جرب تاني.");
@@ -157,20 +168,20 @@ If no expense found, return []. No markdown, no extra text.`;
           merchant: exp.merchant,
           categoryId: categoryId || defaultCategory?.id || "auto",
           type: 'manual',
-          notes: `AI Voice: ${text}`
+          notes: `تسجيل صوتي: ${text}`
         });
       }
 
       setMessage(`✅ تم تسجيل ${expenses.length} معاملات بنجاح.`);
       setTimeout(() => router.push("/transactions"), 2000);
+      
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (error: any) {
-      console.error(error);
-      setMessage("❌ " + (error.message || "حدث خطأ غير متوقع"));
+      console.error("Parse Error:", error);
+      setMessage("❌ خطأ في فهم البيانات، حاول بكلمات أبسط.");
       setIsProcessing(false);
     }
   };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
