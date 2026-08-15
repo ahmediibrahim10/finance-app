@@ -1,31 +1,32 @@
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 type Expense = {
   amount: number;
   merchant: string;
 };
 
-function sanitizeExpenses(value: unknown): Expense[] {
+function cleanExpenses(value: unknown): Expense[] {
   if (!Array.isArray(value)) return [];
 
   return value
     .map((item) => {
-      const amount = Number((item as any)?.amount);
-      const merchant = String((item as any)?.merchant ?? "").trim();
+      if (!item || typeof item !== "object") return null;
 
-      if (!Number.isFinite(amount) || amount <= 0 || !merchant) return null;
+      const rawAmount = Number((item as any).amount);
+      const rawMerchant = String((item as any).merchant ?? "").trim();
+
+      if (!Number.isFinite(rawAmount) || rawAmount <= 0 || !rawMerchant) {
+        return null;
+      }
 
       return {
-        amount: Math.round(amount * 100) / 100,
-        merchant: merchant.slice(0, 120),
+        amount: Number(rawAmount.toFixed(2)),
+        merchant: rawMerchant.slice(0, 120),
       };
     })
-    .filter((x): x is Expense => Boolean(x));
+    .filter((item): item is Expense => item !== null);
 }
 
 export async function POST(request: Request) {
@@ -39,79 +40,55 @@ export async function POST(request: Request) {
       );
     }
 
-    const body = await request.json();
+    const body = await request.json().catch(() => null);
     const text = typeof body?.text === "string" ? body.text.trim() : "";
 
     if (!text) {
       return NextResponse.json({ expenses: [] });
     }
 
-    const response = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "openai/gpt-oss-20b",
-        temperature: 0,
-        messages: [
-          {
-            role: "system",
-            content: `
-أنت محلل مصروفات ذكي. مهمتك الوحيدة استخراج المصاريف من كلام عربي أو مصري عامي.
+    const systemPrompt = `
+أنت محلل مصروفات مالية.
+مهمتك الوحيدة استخراج المصاريف المذكورة بوضوح من النص العربي أو المصري العامي.
 
 القواعد:
-- استخرج كل عملية صرف مستقلة، وليس إجمالي الكلام فقط.
-- "دفعت 25 قهوة و40 أوبر" = عمليتان.
-- amount يجب أن يكون الرقم المدفوع فقط.
-- merchant هو المكان/الخدمة/الشيء الذي تم الدفع له، بدون كلام زائد.
-- افهم الأرقام العربية والعامية مثل: خمسة وعشرين، تلاتين، مية وعشرين.
-- افهم "بـ25" و"بخمسة وعشرين" و"دفعت 25 ريال".
-- لا تعتبر رقمًا راتبًا أو دخلًا مصروفًا إلا إذا كان واضحًا أنه تم دفعه.
-- لا تخترع مبلغًا غير موجود.
-- إذا لم يكن هناك مصروف واضح، أرجع مصفوفة فارغة.
-- لا تضف عملة إلى amount.
-- لا تكرر نفس العملية.
-- الرد يجب أن يكون JSON فقط.
-            `.trim(),
-          },
-          {
-            role: "user",
-            content: `النص المراد تحليله:\n${text}`,
-          },
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "expense_extraction",
-            strict: true,
-            schema: {
-              type: "object",
-              properties: {
-                expenses: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      amount: { type: "number" },
-                      merchant: { type: "string" },
-                    },
-                    required: ["amount", "merchant"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["expenses"],
-              additionalProperties: false,
-            },
-          },
-        },
-      }),
-      cache: "no-store",
-    });
+1. استخرج كل مصروف مستقل.
+2. amount يجب أن يكون رقمًا فقط وبالعملة المذكورة في النص.
+3. لا تخترع أي مبلغ أو اسم تاجر غير موجود في النص.
+4. لو المبلغ غير واضح، لا تستخرج العملية.
+5. افهم اللهجة المصرية والعربية العامية والأرقام المكتوبة بالكلمات عندما تكون واضحة.
+6. أمثلة: "دفعت 25 على قهوة" => 25 وقهوة.
+7. "دفعت 40 لأوبر و120 في السوبر ماركت" => عمليتان.
+8. أعد JSON فقط بالشكل:
+{"expenses":[{"amount":25,"merchant":"قهوة"}]}
+9. لا تضف markdown أو شرحًا.
+`;
 
-    const responseText = await response.text();
+    const userPrompt = `النص:
+${text}`;
+
+    const groqResponse = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-oss-20b",
+          temperature: 0,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+        }),
+      }
+    );
+
+    const responseText = await groqResponse.text();
+
     let data: any = {};
     try {
       data = responseText ? JSON.parse(responseText) : {};
@@ -119,44 +96,52 @@ export async function POST(request: Request) {
       data = {};
     }
 
-    if (!response.ok) {
-      console.error("Groq expense extraction error:", response.status, data);
+    if (!groqResponse.ok) {
+      console.error("Groq expense parser error:", groqResponse.status, data);
       return NextResponse.json(
         {
           error:
             data?.error?.message ||
-            `فشل تحليل المصروفات (${response.status}).`,
+            `فشل تحليل المصاريف (${groqResponse.status}).`,
         },
-        { status: response.status }
+        { status: groqResponse.status }
       );
     }
 
-    const content = data?.choices?.[0]?.message?.content;
-    if (typeof content !== "string") {
-      return NextResponse.json(
-        { error: "Groq لم يرجع نتيجة تحليل صالحة." },
-        { status: 502 }
-      );
+    const aiText =
+      data?.choices?.[0]?.message?.content &&
+      typeof data.choices[0].message.content === "string"
+        ? data.choices[0].message.content
+        : "";
+
+    if (!aiText) {
+      return NextResponse.json({ expenses: [] });
     }
 
     let parsed: any;
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(aiText);
     } catch {
-      return NextResponse.json(
-        { error: "نتيجة Groq ليست JSON صالحة." },
-        { status: 502 }
-      );
+      const objectMatch = aiText.match(/\{[\s\S]*\}/);
+      if (!objectMatch) {
+        return NextResponse.json({ expenses: [] });
+      }
+      parsed = JSON.parse(objectMatch[0]);
     }
 
     return NextResponse.json({
-      expenses: sanitizeExpenses(parsed?.expenses),
-      transcript: text,
+      expenses: cleanExpenses(parsed?.expenses),
     });
   } catch (error) {
     console.error("ai-expense route error:", error);
+
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "خطأ داخلي في تحليل المصروفات." },
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "خطأ داخلي في تحليل المصاريف.",
+      },
       { status: 500 }
     );
   }

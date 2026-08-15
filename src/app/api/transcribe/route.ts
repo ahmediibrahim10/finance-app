@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
@@ -16,46 +15,57 @@ export async function POST(request: Request) {
       );
     }
 
-    const incomingForm = await request.formData();
-    const audioFile = incomingForm.get("file");
+    const form = await request.formData();
+    const audioFile = form.get("file");
 
-    if (!(audioFile instanceof File) || audioFile.size === 0) {
+    if (!(audioFile instanceof Blob)) {
       return NextResponse.json(
-        { error: "لم يتم استلام تسجيل صوتي صالح." },
+        { error: "لم يتم استلام ملف صوتي صالح." },
+        { status: 400 }
+      );
+    }
+
+    if (audioFile.size === 0) {
+      return NextResponse.json(
+        { error: "ملف التسجيل فاضي." },
         { status: 400 }
       );
     }
 
     if (audioFile.size > MAX_AUDIO_BYTES) {
       return NextResponse.json(
-        { error: "ملف التسجيل كبير جدًا. حاول تسجيل مقطع أقصر." },
+        { error: "ملف التسجيل كبير جدًا." },
         { status: 413 }
       );
     }
 
+    const fileName =
+      audioFile instanceof File && audioFile.name
+        ? audioFile.name
+        : "expense-audio.webm";
+
     const forwardForm = new FormData();
-    forwardForm.append("file", audioFile, audioFile.name || "voice.webm");
+    forwardForm.append("file", audioFile, fileName);
     forwardForm.append("model", "whisper-large-v3");
     forwardForm.append("language", "ar");
     forwardForm.append(
       "prompt",
-      "تسجيل مصاريف يومية باللهجة المصرية والعربية العامية. " +
-        "أسماء وألفاظ محتملة: دفعت، صرفت، اشتريت، جبت، بـ، جنيه، ريال، هللة، " +
-        "قهوة، مطعم، بقالة، سوبر ماركت، أوبر، كريم، مواصلات، بنزين، فاتورة، كهرباء، " +
-        "مياه، فطار، غدا، عشا، نت، اشتراك."
+      "تسجيل صوتي لمصاريف يومية باللهجة المصرية والعربية العامية. قد يحتوي على: دفعت، اشتريت، جبت، دفعت كام، بـ، جنيه، ريال، قهوة، فطار، غدا، عشا، أوبر، كريم، مواصلات، فاتورة، سوبر ماركت."
     );
 
-    const groqRes = await fetch(
+    const groqResponse = await fetch(
       "https://api.groq.com/openai/v1/audio/transcriptions",
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
         body: forwardForm,
-        cache: "no-store",
       }
     );
 
-    const responseText = await groqRes.text();
+    const responseText = await groqResponse.text();
+
     let data: any = {};
     try {
       data = responseText ? JSON.parse(responseText) : {};
@@ -63,32 +73,31 @@ export async function POST(request: Request) {
       data = {};
     }
 
-    if (!groqRes.ok) {
-      console.error("Groq transcription error:", groqRes.status, data);
+    if (!groqResponse.ok) {
+      console.error("Groq transcription error:", groqResponse.status, data);
       return NextResponse.json(
         {
           error:
             data?.error?.message ||
-            `فشل تحويل الصوت إلى نص (${groqRes.status}).`,
+            `فشل تحويل الصوت لنص (${groqResponse.status}).`,
         },
-        { status: groqRes.status }
+        { status: groqResponse.status }
       );
     }
 
     const text = typeof data?.text === "string" ? data.text.trim() : "";
 
-    if (!text) {
-      return NextResponse.json(
-        { error: "Groq لم يجد كلامًا واضحًا في التسجيل." },
-        { status: 422 }
-      );
-    }
-
     return NextResponse.json({ text });
   } catch (error) {
     console.error("transcribe route error:", error);
+
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "خطأ أثناء تحويل الصوت." },
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "خطأ غير معروف أثناء تحويل الصوت.",
+      },
       { status: 500 }
     );
   }

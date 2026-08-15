@@ -2,48 +2,63 @@ import { db } from "@/db";
 import { Transaction } from "@/types/models";
 import { toMinorUnits } from "@/utils/currency";
 
+function normalizeMerchant(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function validateAmount(amount: string | number): number {
+  const numeric = Number(amount);
+
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    throw new Error("المبلغ غير صالح.");
+  }
+
+  const amountMinor = toMinorUnits(numeric);
+
+  if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
+    throw new Error("المبلغ غير صالح.");
+  }
+
+  return amountMinor;
+}
+
 export async function addExpense(
   amount: string | number,
   merchant: string,
   categoryId: string,
   source: "manual" | "sms" = "manual",
-  note = "",
+  note: string = "",
   referenceId?: string
 ): Promise<Transaction | null> {
-  const cleanMerchant = merchant.trim();
-  const amountMinor = toMinorUnits(amount);
+  const amountMinor = validateAmount(amount);
+  const cleanMerchant = normalizeMerchant(merchant);
+
+  if (!cleanMerchant) {
+    throw new Error("اسم التاجر مطلوب.");
+  }
+
   const now = Date.now();
-
-  if (!cleanMerchant || amountMinor <= 0 || !Number.isFinite(amountMinor)) {
-    throw new Error("بيانات المصروف غير صالحة.");
-  }
-
-  if (source === "sms" && referenceId) {
-    const existing = await db.transactions
-      .where("fingerprint")
-      .equals(referenceId)
-      .first();
-
-    if (existing) {
-      return null;
-    }
-  }
 
   if (source === "sms" && !referenceId) {
     const oneHourAgo = now - 60 * 60 * 1000;
-    const recent = await db.transactions
+
+    const recentTransactions = await db.transactions
       .where("date")
       .above(oneHourAgo)
       .toArray();
 
-    const duplicate = recent.some(
+    const duplicate = recentTransactions.some(
       (tx) =>
-        tx.merchant.toLowerCase() === cleanMerchant.toLowerCase() &&
+        tx.source === "sms" &&
         tx.amountMinor === amountMinor &&
-        tx.source === "sms"
+        normalizeMerchant(tx.merchant).toLowerCase() ===
+          cleanMerchant.toLowerCase()
     );
 
-    if (duplicate) return null;
+    if (duplicate) {
+      console.warn("Duplicate SMS transaction prevented.");
+      return null;
+    }
   }
 
   const fingerprint =
@@ -59,33 +74,13 @@ export async function addExpense(
     date: now,
     source,
     type: "expense",
-    note,
+    note: note.trim(),
     fingerprint,
     createdAt: now,
     updatedAt: now,
   };
 
-  await db.transaction(
-    "rw",
-    db.transactions,
-    db.fixedExpenses,
-    async () => {
-      await db.transactions.add(newTransaction);
-
-      const fixedExpenses = await db.fixedExpenses.toArray();
-      const matchingFixed = fixedExpenses.find(
-        (expense) =>
-          expense.amountMinor === amountMinor ||
-          expense.name.toLowerCase().includes(cleanMerchant.toLowerCase())
-      );
-
-      if (matchingFixed) {
-        await db.fixedExpenses.update(matchingFixed.id, {
-          lastPaidDate: now,
-        });
-      }
-    }
-  );
+  await db.transactions.add(newTransaction);
 
   return newTransaction;
 }
@@ -95,25 +90,36 @@ export async function updateExpense(
   amount: string | number,
   merchant: string,
   categoryId: string,
-  note = ""
+  note: string = ""
 ): Promise<void> {
-  const amountMinor = toMinorUnits(amount);
-  const cleanMerchant = merchant.trim();
+  const amountMinor = validateAmount(amount);
+  const cleanMerchant = normalizeMerchant(merchant);
 
-  if (!id || !cleanMerchant || amountMinor <= 0) {
-    throw new Error("بيانات التعديل غير صالحة.");
+  if (!cleanMerchant) {
+    throw new Error("اسم التاجر مطلوب.");
+  }
+
+  const existing = await db.transactions.get(id);
+
+  if (!existing) {
+    throw new Error("المعاملة غير موجودة.");
   }
 
   await db.transactions.update(id, {
     amountMinor,
     merchant: cleanMerchant,
     categoryId,
-    note,
+    note: note.trim(),
     updatedAt: Date.now(),
   });
 }
 
 export async function deleteExpense(id: string): Promise<void> {
-  if (!id) throw new Error("معرف المصروف غير صالح.");
+  const existing = await db.transactions.get(id);
+
+  if (!existing) {
+    throw new Error("المعاملة غير موجودة.");
+  }
+
   await db.transactions.delete(id);
 }
